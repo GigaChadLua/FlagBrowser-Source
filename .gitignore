@@ -1,0 +1,53 @@
+# Build output
+bin/
+obj/
+artifacts/
+publish/
+release/
+releases/
+
+# Compiled files
+*.exe
+*.dll
+*.pdb
+*.deps.json
+*.runtimeconfig.json
+*.so
+*.dylib
+
+# Archives and installers
+*.zip
+*.7z
+*.rar
+*.msi
+
+# Local IDE files
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.cache
+*.bak
+*.swp
+Thumbs.db
+Desktop.ini
+
+# Local app data / generated config
+settings.json
+features.json
+profiles/
+values.hpp
+!WPF UI version/Resources/values.hpp
+
+# NuGet
+*.nupkg
+packages/
+project.lock.json
