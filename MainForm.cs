@@ -15,11 +15,12 @@ public sealed class MainForm : Form
     const int MOD_NOREPEAT = 0x4000;
     static readonly string APP_DIR            = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "FlagInjector");
-    static readonly string LOCAL_OFFSETS_FILE = Path.Combine(APP_DIR, "offsets_cache.cs");
+    const string DefaultUrl1 = "https://imtheo.lol/Offsets/FFlags.cs";
+    const string DefaultUrl2 = "https://npdrlaufeimrkvdnjijl.supabase.co/functions/v1/get-offsets";
+    const string ExtraOffsetsUrl = "https://raw.githubusercontent.com/soulukr78/BestRobloxOffsets/refs/heads/main/BestRobloxOffsets";
     readonly InjectionEngine   _engine   = new();
     readonly OffsetLoader      _loader   = new();
     readonly OffsetlessScanner _scanner  = new();
-    readonly ProfileManager    _profiles = new();
     AppSettings                _appCfg   = AppSettings.Load();
     FeatureSettings            _feat     = FeatureSettings.Load();
     FeatureEngine?             _featEng;
@@ -28,16 +29,8 @@ public sealed class MainForm : Form
     int             _selMod   = -1;
     string          _selAvail = "";
     bool            _autoAttach = true;
-    bool            _useLocalFile;
     bool            _showPresets = true;
     readonly Dictionary<int, int> _flagHotkeys = new();
-    RadioButton  rdoUrl       = null!;
-    RadioButton  rdoFile      = null!;
-    Panel        pnlUrlMode   = null!;
-    Panel        pnlFileMode  = null!;
-    TextBox      txtUrl1      = null!;
-    TextBox      txtUrl2      = null!;
-    TextBox      txtFilePath  = null!;
     Label        lblOffsets   = null!;
     TextBox      txtSearchAvail = null!;
     ListBox      lstAvail       = null!;
@@ -57,7 +50,6 @@ public sealed class MainForm : Form
     TextBox      txtHotkey     = null!;
     Button       btnClearHotkey = null!;
     Label        lblFlagInfo   = null!;
-    ComboBox             cmbProfiles   = null!;
     CheckBox             chkAutoAttach = null!;
     ToolStripStatusLabel tsslStatus    = null!;
     ToolStripStatusLabel tsslRoblox    = null!;
@@ -167,60 +159,28 @@ public sealed class MainForm : Form
         Controls.Add(pnlTop);
         Controls.Add(pnlBot);
         Controls.Add(ss);
-        RefreshProfiles();
     }
     Panel BuildTopPanel()
     {
-        var pnl = new Panel { Height = 82, BackColor = Color.FromArgb(245, 245, 245) };
-        rdoUrl  = new RadioButton { Text = "URL",        Left = 6,  Top = 6, AutoSize = true, Checked = true };
-        rdoFile = new RadioButton { Text = "Local File", Left = 62, Top = 6, AutoSize = true };
-        rdoUrl.CheckedChanged  += (_, _) => { _useLocalFile = false; UpdateSourcePanel(); };
-        rdoFile.CheckedChanged += (_, _) => { _useLocalFile = true;  UpdateSourcePanel(); };
-        var btnLoad = new Button { Text = "⟳ Load", Width = 80, Height = 26, Top = 26, Anchor = AnchorStyles.Right | AnchorStyles.Top };
+        var pnl = new Panel { Height = 64, BackColor = Color.FromArgb(245, 245, 245) };
+        var title = new Label { Text = "Offset Data", Left = 8, Top = 8, AutoSize = true, Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
+        var subtitle = new Label { Text = "Managed automatically", Left = 8, Top = 28, AutoSize = true, ForeColor = Color.Gray };
+        var btnLoad = new Button { Text = "Load", Width = 80, Height = 26, Top = 18, Anchor = AnchorStyles.Right | AnchorStyles.Top };
         pnl.Resize += (_, _) => btnLoad.Left = pnl.Width - btnLoad.Width - 8;
         btnLoad.Click += async (_, _) => await LoadOffsetsAsync();
-        lblOffsets = new Label { Left = 6, Top = 62, AutoSize = true, ForeColor = Color.Gray };
-        pnlUrlMode = new Panel { Left = 6, Top = 22, Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, Height = 40 };
-        pnl.Resize += (_, _) => pnlUrlMode.Width = pnl.Width - 100;
-        var l1 = new Label { Text = "URL 1:", AutoSize = true, Top = 3, Left = 0 };
-        txtUrl1 = new TextBox { Left = 44, Top = 0, Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, Height = 23 };
-        pnlUrlMode.Resize += (_, _) => txtUrl1.Width = pnlUrlMode.Width - 44;
-        var l2 = new Label { Text = "URL 2:", AutoSize = true, Top = 28, Left = 0 };
-        txtUrl2 = new TextBox { Left = 44, Top = 25, Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, Height = 23 };
-        pnlUrlMode.Resize += (_, _) => txtUrl2.Width = pnlUrlMode.Width - 44;
-        pnlUrlMode.Controls.AddRange(new Control[] { l1, txtUrl1, l2, txtUrl2 });
-        pnlFileMode = new Panel { Left = 6, Top = 22, Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, Height = 40, Visible = false };
-        pnl.Resize  += (_, _) => pnlFileMode.Width = pnl.Width - 100;
-        var lf = new Label { Text = "File:", AutoSize = true, Top = 8, Left = 0 };
-        txtFilePath = new TextBox { Left = 36, Top = 5, PlaceholderText = "Path to FFlags.cs / FFlags.hpp ..." };
-        pnlFileMode.Resize += (_, _) => txtFilePath.Width = pnlFileMode.Width - 220;
-        var btnBrowse = new Button { Text = "Browse...", Top = 3, Width = 80, Height = 24 };
-        pnlFileMode.Resize += (_, _) => btnBrowse.Left = txtFilePath.Right + 4;
-        btnBrowse.Click += BrowseOffsetFile;
-        var btnUpdateUrl = new Button { Text = "↓ Update", Top = 3, Width = 75, Height = 24 };
-        pnlFileMode.Resize += (_, _) => btnUpdateUrl.Left = btnBrowse.Right + 4;
-        btnUpdateUrl.Click += async (_, _) => await UpdateLocalFileAsync();
-        pnlFileMode.Controls.AddRange(new Control[] { lf, txtFilePath, btnBrowse, btnUpdateUrl });
-        pnl.Controls.AddRange(new Control[] { rdoUrl, rdoFile, pnlUrlMode, pnlFileMode, btnLoad, lblOffsets });
+        lblOffsets = new Label { Left = 190, Top = 29, AutoSize = true, ForeColor = Color.Gray };
+        pnl.Controls.AddRange(new Control[] { title, subtitle, btnLoad, lblOffsets });
         return pnl;
     }
     Panel BuildBottomPanel()
     {
         var pnl = new Panel { Height = 46 };
         int x   = 6;
-        var lblP = new Label { Text = "Profile:", AutoSize = true, Top = 14, Left = x }; x += 52;
-        cmbProfiles = new ComboBox { Left = x, Top = 10, Width = 140, DropDownStyle = ComboBoxStyle.DropDownList }; x += 146;
-        pnl.Controls.Add(lblP);
-        pnl.Controls.Add(cmbProfiles);
-        Btn(pnl, "Save",        ref x, SaveProfile);
-        Btn(pnl, "Load",        ref x, LoadProfile);
-        Btn(pnl, "Delete",      ref x, DeleteProfile);
-        x += 8;
         Btn(pnl, "➕ Add Flag", ref x, DoAdicionar, width: 105);
         Btn(pnl, "Export JSON", ref x, DoExport,    width: 95);
         Btn(pnl, "Remove All",  ref x, DoRemoveAll, width: 85);
         Btn(pnl, "📂 Defaults", ref x, BrowseDefaultValues, width: 90);
-        Btn(pnl, "↩ Restore",  ref x, DoUninject,  width: 85);
+        Btn(pnl, "Restore All",  ref x, DoUninject,  width: 95);
         x += 8;
         var btnApply = new Button { Text = "▶ Apply All  [F8]", Left = x, Top = 8, Width = 128, Height = 30 };
         btnApply.BackColor = Color.FromArgb(34, 110, 34);
@@ -330,29 +290,13 @@ public sealed class MainForm : Form
         p.Controls.Add(b);
         x += width + 4;
     }
-    void UpdateSourcePanel()
-    {
-        pnlUrlMode.Visible  = !_useLocalFile;
-        pnlFileMode.Visible =  _useLocalFile;
-    }
     void ApplySettings()
     {
-        txtUrl1.Text       = _appCfg.Url1;
-        txtUrl2.Text       = _appCfg.Url2;
-        txtFilePath.Text   = string.IsNullOrEmpty(_appCfg.LocalFilePath) ? LOCAL_OFFSETS_FILE : _appCfg.LocalFilePath;
-        _useLocalFile      = _appCfg.UseLocalFile;
         _showPresets       = _appCfg.ShowPresets;
-        rdoFile.Checked    = _useLocalFile;
-        rdoUrl.Checked     = !_useLocalFile;
         if (chkShowPresets is not null) chkShowPresets.Checked = _showPresets;
-        UpdateSourcePanel();
     }
     void SaveAppSettings()
     {
-        _appCfg.Url1          = txtUrl1.Text.Trim();
-        _appCfg.Url2          = txtUrl2.Text.Trim();
-        _appCfg.LocalFilePath = txtFilePath.Text.Trim();
-        _appCfg.UseLocalFile  = _useLocalFile;
         _appCfg.ShowPresets   = _showPresets;
         _appCfg.Save();
     }
@@ -488,7 +432,7 @@ public sealed class MainForm : Form
 
         string notes = string.IsNullOrWhiteSpace(result.Manifest.Notes) ? "" : $"\n\nNotes:\n{result.Manifest.Notes}";
         var ask = MessageBox.Show(
-            $"New version available: {result.LatestVersion}\nCurrent: {result.CurrentVersion}{notes}\n\nDownload and install now?",
+            $"New version available: {result.LatestVersion}\nCurrent: {result.CurrentVersion}{notes}\n\nOpen download now?",
             "Update Available",
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Information);
@@ -498,17 +442,16 @@ public sealed class MainForm : Form
             return;
         }
 
-        SetStatus("Downloading update package...");
-        var (ok, message) = await Updater.DownloadAndApplyUpdateAsync(result.Manifest);
-        if (!ok)
+        try
+        {
+            Updater.OpenDownload(result.Manifest);
+            SetStatus($"Update available: {result.LatestVersion}");
+        }
+        catch (Exception ex)
         {
             SetStatus("Update failed.");
-            MessageBox.Show($"Could not start update:\n{message}", "Updater", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return;
+            MessageBox.Show($"Could not open update:\n{ex.Message}", "Updater", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
-
-        SetStatus("Updater started. Closing app...");
-        Close();
     }
     void InitFeatEngine()
     {
@@ -555,26 +498,10 @@ public sealed class MainForm : Form
     }
     async Task LoadOffsetsAsync()
     {
-        if (_useLocalFile) LoadFromFile();
-        else await LoadFromUrlsAsync();
-    }
-    void LoadFromFile()
-    {
-        string path = txtFilePath.Text.Trim();
-        if (string.IsNullOrEmpty(path)) path = LOCAL_OFFSETS_FILE;
-        SetStatus("Loading from file...");
-        var (count, error) = _loader.LoadFile(path);
-        if (error is not null) { SetStatus($"File load failed: {error}"); return; }
-        SyncScannerFromLoader();
-        var fi = new FileInfo(path);
-        lblOffsets.Text = $"File: {fi.Name}  •  {count} offsets  •  {fi.LastWriteTime:MM/dd HH:mm}";
-        SetStatus($"✔ {count} offsets loaded from file");
-        RefreshAvail();
-    }
-    async Task LoadFromUrlsAsync()
-    {
         SetStatus("Fetching offsets...");
-        var urls = new[] { txtUrl1.Text.Trim(), txtUrl2.Text.Trim() }.Where(u => u.Length > 0);
+        var urls = new[] { DefaultUrl1, DefaultUrl2, ExtraOffsetsUrl }
+            .Where(u => u.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase);
         var (count, errors) = await _loader.LoadUrlsAsync(urls);
         SaveAppSettings();
         SyncScannerFromLoader();
@@ -583,26 +510,10 @@ public sealed class MainForm : Form
             SetStatus($"FAIL: No offsets. {string.Join(" | ", errors)}");
             return;
         }
-        string e = errors.Count > 0 ? $"  ({errors.Count} URL failed)" : "";
-        lblOffsets.Text = $"Source: URL  •  {count} offsets{e}";
+        string e = errors.Count > 0 ? $"  ({errors.Count} source failed)" : "";
+        lblOffsets.Text = $"{count} offsets{e}";
         SetStatus($"✔ {count} offsets loaded");
         RefreshAvail();
-    }
-    async Task UpdateLocalFileAsync()
-    {
-        string url = txtUrl1.Text.Trim();
-        if (string.IsNullOrEmpty(url)) url = _appCfg.Url1;
-        SetStatus("Downloading...");
-        var (body, error) = await _loader.DownloadAsync(url);
-        if (error is not null) { SetStatus($"Download failed: {error}"); return; }
-        File.WriteAllText(LOCAL_OFFSETS_FILE, body);
-        txtFilePath.Text = LOCAL_OFFSETS_FILE;
-        LoadFromFile();
-    }
-    void BrowseOffsetFile(object? s, EventArgs e)
-    {
-        using var dlg = new OpenFileDialog { Filter = "Offset files|*.cs;*.hpp;*.h|All files|*.*" };
-        if (dlg.ShowDialog() == DialogResult.OK) { txtFilePath.Text = dlg.FileName; LoadFromFile(); }
     }
     void BrowseDefaultValues()
     {
@@ -806,13 +717,6 @@ public sealed class MainForm : Form
         if (success) return _appCfg.DarkMode ? Color.FromArgb(92, 214, 150) : Color.DarkGreen;
         if (error) return _appCfg.DarkMode ? Color.FromArgb(255, 106, 106) : Color.DarkRed;
         return _appCfg.DarkMode ? Color.FromArgb(155, 155, 155) : Color.Gray;
-    }
-    void RefreshProfiles()
-    {
-        string cur = cmbProfiles.Text;
-        cmbProfiles.Items.Clear();
-        foreach (var n in _profiles.List()) cmbProfiles.Items.Add(n);
-        if (!string.IsNullOrEmpty(cur)) cmbProfiles.Text = cur;
     }
     void DoAddFlag()
     {
@@ -1145,9 +1049,12 @@ public sealed class MainForm : Form
     void DoUninject()
     {
         if (!_engine.IsAttached) { SetStatus("Roblox not attached"); return; }
-        if (!_engine.HasOriginals) { SetStatus("Nothing to uninject — no originals saved."); return; }
         int restored = _engine.Restore();
-        SetStatus($"↩ Restored {restored} flags to original values.");
+        foreach (var f in _flags)
+            f.Enabled = false;
+        RegisterFlagHotkeys();
+        RefreshMod();
+        SetStatus($"Restored {restored}/{_flags.Count} flags.");
     }
     void TriggerApply() => _ = ApplyAllAsync();
     async Task ApplyWhenReadyAsync()
@@ -1186,32 +1093,6 @@ public sealed class MainForm : Form
         if (writeFail    > 0) parts.Add($"{writeFail} write fail");
         if (diskFallback > 0) parts.Add($"{diskFallback} via disk");
         SetStatus(string.Join("  |  ", parts));
-    }
-    void SaveProfile()
-    {
-        string name = cmbProfiles.Text.Trim();
-        if (name.Length == 0) { MessageBox.Show("Enter a profile name first."); return; }
-        _profiles.Save(new Profile { Name = name, Flags = new List<FlagEntry>(_flags) });
-        RefreshProfiles(); cmbProfiles.Text = name;
-        SetStatus($"Profile '{name}' saved ({_flags.Count} flags).");
-    }
-    void LoadProfile()
-    {
-        string name = cmbProfiles.Text.Trim();
-        var p = _profiles.Load(name);
-        if (p is null) { MessageBox.Show($"Profile '{name}' not found."); return; }
-        _flags = p.Flags;
-        RegisterFlagHotkeys();
-        RefreshMod(); RefreshAvail();
-        SetStatus($"Profile '{p.Name}' loaded ({_flags.Count} flags).");
-        if (_engine.IsAttached) TriggerApply();
-    }
-    void DeleteProfile()
-    {
-        string name = cmbProfiles.Text.Trim();
-        if (MessageBox.Show($"Delete '{name}'?", "Confirm", MessageBoxButtons.YesNo) != DialogResult.Yes) return;
-        _profiles.Delete(name); RefreshProfiles();
-        SetStatus($"Profile '{name}' deleted.");
     }
     void SetStatus(string msg)
     {

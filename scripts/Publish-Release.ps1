@@ -62,7 +62,7 @@ $manifestPath = Join-Path $releaseDir "manifest.json"
 Set-Content -Path $manifestPath -Value $manifest -Encoding UTF8
 
 Write-Host ""
-Write-Host "Release files generated:"
+Write-Host "Release files ready:"
 Write-Host " - $outExe"
 Write-Host " - $manifestPath"
 Write-Host "SHA256: $hash"

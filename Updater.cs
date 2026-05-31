@@ -1,16 +1,19 @@
 using System.Diagnostics;
 using System.Reflection;
-using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace FlagInjector;
 
 public sealed class UpdateManifest
 {
     public string Version { get; set; } = "";
+    public string Url { get; set; } = "";
     public string DownloadUrl { get; set; } = "";
     public string? Sha256 { get; set; }
     public string? Notes { get; set; }
+    [JsonIgnore]
+    public string ResolvedUrl => string.IsNullOrWhiteSpace(DownloadUrl) ? Url : DownloadUrl;
 }
 
 public sealed class UpdateCheckResult
@@ -56,7 +59,7 @@ public static class Updater
 
             string json = await res.Content.ReadAsStringAsync(ct);
             var manifest = JsonSerializer.Deserialize<UpdateManifest>(json, _jsonOpts);
-            if (manifest is null || string.IsNullOrWhiteSpace(manifest.Version) || string.IsNullOrWhiteSpace(manifest.DownloadUrl))
+            if (manifest is null || string.IsNullOrWhiteSpace(manifest.Version) || string.IsNullOrWhiteSpace(manifest.ResolvedUrl))
                 return new UpdateCheckResult
                 {
                     CurrentVersion = current,
@@ -91,84 +94,13 @@ public static class Updater
         }
     }
 
-    public static async Task<(bool ok, string message)> DownloadAndApplyUpdateAsync(UpdateManifest manifest, CancellationToken ct = default)
+    public static void OpenDownload(UpdateManifest manifest)
     {
-        try
-        {
-            string ext = Path.GetExtension(manifest.DownloadUrl);
-            if (!ext.Equals(".exe", StringComparison.OrdinalIgnoreCase) &&
-                !ext.Equals(".msi", StringComparison.OrdinalIgnoreCase))
-                return (false, "Use an .exe or .msi package URL in manifest.");
-
-            string tempDir = Path.Combine(Path.GetTempPath(), "FlagBrowser", "updates");
-            Directory.CreateDirectory(tempDir);
-
-            string installerPath = Path.Combine(tempDir, $"FlagBrowser-{manifest.Version}{ext}");
-
-            using var req = new HttpRequestMessage(HttpMethod.Get, manifest.DownloadUrl);
-            using var res = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
-            res.EnsureSuccessStatusCode();
-
-            await using (var source = await res.Content.ReadAsStreamAsync(ct))
-            await using (var dest = File.Create(installerPath))
-                await source.CopyToAsync(dest, ct);
-
-            if (!string.IsNullOrWhiteSpace(manifest.Sha256))
-            {
-                string actual = ComputeSha256(installerPath);
-                if (!actual.Equals(NormalizeSha(manifest.Sha256), StringComparison.OrdinalIgnoreCase))
-                    return (false, "SHA256 mismatch. Update aborted.");
-            }
-
-            if (ext.Equals(".msi", StringComparison.OrdinalIgnoreCase))
-            {
-                Process.Start(new ProcessStartInfo
-                {
-                    FileName = "msiexec",
-                    Arguments = $"/i \"{installerPath}\"",
-                    UseShellExecute = true
-                });
-                return (true, "MSI installer launched.");
-            }
-
-            string currentExe = Environment.ProcessPath
-                ?? throw new InvalidOperationException("Cannot resolve current executable path.");
-            string targetDir = Path.GetDirectoryName(currentExe)
-                ?? throw new InvalidOperationException("Cannot resolve executable directory.");
-
-            string stageExe = Path.Combine(targetDir, "FlagBrowser.update.exe");
-            File.Copy(installerPath, stageExe, overwrite: true);
-
-            string scriptPath = Path.Combine(tempDir, $"apply-update-{Guid.NewGuid():N}.cmd");
-            string script = $@"@echo off
-setlocal
-set tries=0
-:retry
-set /a tries+=1
-copy /Y ""{stageExe}"" ""{currentExe}"" > nul
-if errorlevel 1 (
-  if %tries% geq 15 exit /b 1
-  ping 127.0.0.1 -n 2 > nul
-  goto retry
-)
-del /F /Q ""{stageExe}"" > nul 2>&1
-start """" ""{currentExe}""
-del /F /Q ""%~f0""";
-            File.WriteAllText(scriptPath, script);
-
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = "cmd.exe",
-                Arguments = $"/c \"{scriptPath}\"",
-                CreateNoWindow = true,
-                UseShellExecute = false
-            });
-            return (true, "Update staged. App will restart on new version.");
-        }
-        catch (Exception ex)
-        {
-            return (false, ex.Message);
-        }
+        string url = manifest.ResolvedUrl.Trim();
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
+            (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+            throw new InvalidOperationException("Invalid update URL.");
+        Process.Start(new ProcessStartInfo { FileName = uri.ToString(), UseShellExecute = true });
     }
 
     static Version GetCurrentVersion()
@@ -187,16 +119,6 @@ del /F /Q ""%~f0""";
             raw = raw[1..];
         return Version.TryParse(raw, out v!);
     }
-
-    static string ComputeSha256(string path)
-    {
-        using var sha = SHA256.Create();
-        using var fs = File.OpenRead(path);
-        return Convert.ToHexString(sha.ComputeHash(fs));
-    }
-
-    static string NormalizeSha(string sha) =>
-        sha.Replace(" ", "").Replace("-", "").Trim().ToUpperInvariant();
 
     static string NormalizeManifestUrl(string raw)
     {

@@ -41,11 +41,6 @@ public class FlagEntry
         return "string";
     }
 }
-public class Profile
-{
-    public string          Name  { get; set; } = "Default";
-    public List<FlagEntry> Flags { get; set; } = new();
-}
 public static class PresetFlags
 {
     public static readonly IReadOnlyDictionary<string, string> All =
