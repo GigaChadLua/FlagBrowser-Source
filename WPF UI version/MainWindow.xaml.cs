@@ -1,9 +1,11 @@
-﻿using System.Collections.ObjectModel;
+using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Threading;
 using FlagInjector;
 using Microsoft.Win32;
@@ -12,6 +14,17 @@ namespace FlagInjectorWpf;
 
 public partial class MainWindow : Window
 {
+    [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr hWnd, int id, int fsModifiers, int vk);
+    [DllImport("user32.dll")] static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+    const int WmHotkey = 0x0312;
+    const int HotkeyApply = 1;
+    const int HotkeyFlagBase = 1000;
+    const int ModAlt = 0x0001;
+    const int ModControl = 0x0002;
+    const int ModShift = 0x0004;
+    const int ModNoRepeat = 0x4000;
+
     const string DefaultUrl1 = "https://imtheo.lol/Offsets/FFlags.cs";
     const string DefaultUrl2 = "https://npdrlaufeimrkvdnjijl.supabase.co/functions/v1/get-offsets";
     const string ExtraOffsetsUrl = "https://raw.githubusercontent.com/soulukr78/BestRobloxOffsets/refs/heads/main/BestRobloxOffsets";
@@ -24,9 +37,13 @@ public partial class MainWindow : Window
     readonly FeatureSettings _features = FeatureSettings.Load();
     readonly DispatcherTimer _robloxTimer = new() { Interval = TimeSpan.FromSeconds(1) };
     FeatureEngine? _featureEngine;
+    HwndSource? _source;
+    bool _applyHotkeyRegistered;
+    bool _capturingHotkey;
 
     readonly List<string> _allAvailableNames = new();
     readonly List<FlagEntry> _flags = new();
+    readonly Dictionary<int, int> _flagHotkeys = new();
 
     public ObservableCollection<AvailableFlagRow> AvailableFlags { get; } = new();
     public ObservableCollection<ModifiedFlagRow> ModifiedFlags { get; } = new();
@@ -53,6 +70,13 @@ public partial class MainWindow : Window
         });
         _engine.OnDetachCleanup += () => _scanner.ClearCache();
 
+        SourceInitialized += (_, _) =>
+        {
+            _source = HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);
+            _source?.AddHook(WndProc);
+            RegisterApplyHotkey();
+            RegisterFlagHotkeys();
+        };
         Loaded += async (_, _) =>
         {
             ApplyOffsetSettings();
@@ -62,6 +86,9 @@ public partial class MainWindow : Window
         };
         Closed += (_, _) =>
         {
+            UnregisterFlagHotkeys();
+            UnregisterApplyHotkey();
+            _source?.RemoveHook(WndProc);
             _robloxTimer.Stop();
             _featureEngine?.Dispose();
             _engine.Dispose();
@@ -236,7 +263,6 @@ public partial class MainWindow : Window
             }
             catch
             {
-                
             }
         };
         _robloxTimer.Start();
@@ -310,15 +336,34 @@ public partial class MainWindow : Window
     {
         var flag = SelectedFlag();
         if (flag is null) return;
+        ApplyToggle(flag);
+    }
+
+    bool ApplyRestoreValue(FlagEntry flag)
+    {
+        string? restoreValue = flag.DefaultValue ?? (flag.OriginalValue.Length > 0 ? flag.OriginalValue : null);
+        if (restoreValue is null) return false;
+        var temp = new FlagEntry(flag.Name, restoreValue) { Type = flag.Type };
+        return _engine.ApplyOne(temp, _loader.Offsets, _scanner, _features.OffsetlessEnabled, _features.DiskFallbackEnabled);
+    }
+
+    void ApplyToggle(FlagEntry flag)
+    {
         flag.Enabled = !flag.Enabled;
 
-        if (_engine.IsAttached)
+        if (!flag.Enabled && _engine.IsAttached)
         {
-            if (flag.Enabled)
-                _engine.ApplyOne(flag, _loader.Offsets, _scanner, _features.OffsetlessEnabled, _features.DiskFallbackEnabled);
-            else
-                _engine.UninjectOne(flag.Name);
+            bool restored = _engine.UninjectOne(flag.Name) || ApplyRestoreValue(flag);
+            RefreshModified();
+            SelectModified(flag.Name);
+            SetStatus(restored
+                ? $"{flag.Name}: Disabled"
+                : $"{flag.Name}: Disabled, but no original/default/initial value was available to restore");
+            return;
         }
+
+        if (flag.Enabled && _engine.IsAttached)
+            _engine.ApplyOne(flag, _loader.Offsets, _scanner, _features.OffsetlessEnabled, _features.DiskFallbackEnabled);
 
         RefreshModified();
         SelectModified(flag.Name);
@@ -330,6 +375,7 @@ public partial class MainWindow : Window
         var flag = SelectedFlag();
         if (flag is null) return;
         _flags.Remove(flag);
+        RegisterFlagHotkeys();
         RefreshAvailable();
         RefreshModified();
         PopulateEditFields(null);
@@ -348,8 +394,10 @@ public partial class MainWindow : Window
     void ResetDefault_Click(object sender, RoutedEventArgs e)
     {
         var flag = SelectedFlag();
-        if (flag?.DefaultValue is null) return;
-        flag.Update(flag.DefaultValue);
+        if (flag is null) return;
+        var value = flag.DefaultValue ?? flag.OriginalValue;
+        if (string.IsNullOrWhiteSpace(value)) return;
+        flag.Update(value);
         UpdateValueBox.Text = flag.Value;
         if (_engine.IsAttached)
             _engine.ApplyOne(flag, _loader.Offsets, _scanner, _features.OffsetlessEnabled, _features.DiskFallbackEnabled);
@@ -363,8 +411,11 @@ public partial class MainWindow : Window
         if (flag is null) return;
         flag.Hotkey = "";
         HotkeyBox.Text = "";
+        RegisterFlagHotkeys();
+        if (_capturingHotkey) UnregisterFlagHotkeys();
         RefreshModified();
         SelectModified(flag.Name);
+        SetStatus($"Hotkey cleared: {flag.Name}");
     }
 
     async void ApplyAll_Click(object sender, RoutedEventArgs e) => await ApplyAllAsync();
@@ -390,9 +441,36 @@ public partial class MainWindow : Window
             flag.DefaultValue ??= FlagDefaults.Instance.Get(flag.Name);
             _flags.Add(flag);
         }
+        RegisterFlagHotkeys();
         RefreshAvailable();
         RefreshModified();
         SetStatus($"Profile 'Default' loaded ({_flags.Count} flags).");
+    }
+
+    void ImportJson_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFileDialog { Filter = "JSON Files|*.json|All Files|*.*" };
+        if (dialog.ShowDialog(this) != true) return;
+
+        try
+        {
+            var imported = FlagParser.Parse(File.ReadAllText(dialog.FileName));
+            if (imported.Count == 0)
+            {
+                SetStatus("Import failed: no flags found.");
+                return;
+            }
+
+            var (added, skipped) = FlagParser.MergeInto(_flags, imported);
+            RegisterFlagHotkeys();
+            RefreshAvailable();
+            RefreshModified();
+            SetStatus($"Imported {added} flags. Skipped {skipped} duplicates.");
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Import failed: {ex.Message}");
+        }
     }
 
     void ExportJson_Click(object sender, RoutedEventArgs e)
@@ -401,6 +479,251 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) != true) return;
         File.WriteAllText(dialog.FileName, FlagParser.ToJson(_flags));
         SetStatus($"Exported {_flags.Count} flags.");
+    }
+
+    void HotkeyBox_GotFocus(object sender, RoutedEventArgs e)
+    {
+        if (_capturingHotkey) return;
+        _capturingHotkey = true;
+        UnregisterApplyHotkey();
+        UnregisterFlagHotkeys();
+        SetStatus("Press Ctrl/Alt/Shift plus a key, or F1-F12. F8 is reserved for Apply.");
+    }
+
+    void HotkeyBox_LostFocus(object sender, RoutedEventArgs e)
+    {
+        if (!_capturingHotkey) return;
+        _capturingHotkey = false;
+        RegisterApplyHotkey();
+        RegisterFlagHotkeys();
+    }
+
+    void HotkeyBox_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        e.Handled = true;
+
+        var flag = SelectedFlag();
+        if (flag is null) return;
+
+        Key key = RealKey(e);
+        if (IsModifierKey(key)) return;
+
+        int modifiers = ModifiersFromKeyboard(Keyboard.Modifiers);
+        bool bareFunctionKey = IsBareFunctionKey(key);
+        if (modifiers == 0 && !bareFunctionKey)
+        {
+            SetStatus("Use Ctrl/Alt/Shift, or F1-F12. F8 is reserved for Apply.");
+            return;
+        }
+
+        if (modifiers == 0 && key == Key.F8)
+        {
+            SetStatus("F8 is reserved for Apply.");
+            return;
+        }
+
+        string hotkey = FormatHotkey(modifiers, key);
+        int selectedIndex = _flags.IndexOf(flag);
+        int existing = _flags.FindIndex(f => string.Equals(f.Hotkey, hotkey, StringComparison.OrdinalIgnoreCase));
+        if (existing >= 0 && existing != selectedIndex)
+        {
+            SetStatus($"Hotkey already used by {_flags[existing].Name}");
+            return;
+        }
+
+        string previousHotkey = flag.Hotkey;
+        flag.Hotkey = hotkey;
+        HotkeyBox.Text = hotkey;
+        bool registered = RegisterFlagHotkeys();
+        if (_capturingHotkey) UnregisterFlagHotkeys();
+        if (!registered)
+        {
+            flag.Hotkey = previousHotkey;
+            HotkeyBox.Text = previousHotkey;
+            if (!_capturingHotkey) RegisterFlagHotkeys();
+        }
+
+        RefreshModified();
+        SelectModified(flag.Name);
+        SetStatus(registered ? $"Hotkey set: {flag.Name} -> {hotkey}" : $"Hotkey unavailable: {hotkey}");
+    }
+
+    void RegisterApplyHotkey()
+    {
+        if (_applyHotkeyRegistered || _source is null) return;
+        _applyHotkeyRegistered = RegisterHotKey(_source.Handle, HotkeyApply, ModNoRepeat, KeyInterop.VirtualKeyFromKey(Key.F8));
+    }
+
+    void UnregisterApplyHotkey()
+    {
+        if (!_applyHotkeyRegistered || _source is null) return;
+        UnregisterHotKey(_source.Handle, HotkeyApply);
+        _applyHotkeyRegistered = false;
+    }
+
+    bool RegisterFlagHotkeys()
+    {
+        UnregisterFlagHotkeys();
+        if (_source is null) return true;
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        bool allRegistered = true;
+        for (int i = 0; i < _flags.Count; i++)
+        {
+            string hotkey = (_flags[i].Hotkey ?? "").Trim();
+            if (hotkey.Length == 0) continue;
+            if (!TryParseHotkey(hotkey, out int modifiers, out Key key))
+            {
+                allRegistered = false;
+                continue;
+            }
+
+            string normalized = FormatHotkey(modifiers, key);
+            if (!seen.Add(normalized))
+            {
+                allRegistered = false;
+                SetStatus($"Hotkey duplicated: {normalized}");
+                continue;
+            }
+
+            int id = HotkeyFlagBase + i;
+            if (RegisterHotKey(_source.Handle, id, modifiers | ModNoRepeat, KeyInterop.VirtualKeyFromKey(key)))
+                _flagHotkeys[id] = i;
+            else
+            {
+                allRegistered = false;
+                SetStatus($"Hotkey busy: {normalized}");
+            }
+        }
+
+        return allRegistered;
+    }
+
+    void UnregisterFlagHotkeys()
+    {
+        if (_source is null)
+        {
+            _flagHotkeys.Clear();
+            return;
+        }
+
+        foreach (int id in _flagHotkeys.Keys.ToList())
+            UnregisterHotKey(_source.Handle, id);
+        _flagHotkeys.Clear();
+    }
+
+    void ToggleFlagAt(int index)
+    {
+        if (index < 0 || index >= _flags.Count) return;
+        ApplyToggle(_flags[index]);
+    }
+
+    static Key RealKey(KeyEventArgs e) =>
+        e.Key == Key.System ? e.SystemKey :
+        e.Key == Key.ImeProcessed ? e.ImeProcessedKey :
+        e.Key == Key.DeadCharProcessed ? e.DeadCharProcessedKey :
+        e.Key;
+
+    static int ModifiersFromKeyboard(ModifierKeys keys)
+    {
+        int modifiers = 0;
+        if ((keys & ModifierKeys.Control) == ModifierKeys.Control) modifiers |= ModControl;
+        if ((keys & ModifierKeys.Alt) == ModifierKeys.Alt) modifiers |= ModAlt;
+        if ((keys & ModifierKeys.Shift) == ModifierKeys.Shift) modifiers |= ModShift;
+        return modifiers;
+    }
+
+    static bool IsModifierKey(Key key) =>
+        key is Key.LeftCtrl or Key.RightCtrl or Key.LeftShift or Key.RightShift or Key.LeftAlt or Key.RightAlt or Key.LWin or Key.RWin;
+
+    static bool IsBareFunctionKey(Key key) =>
+        key >= Key.F1 && key <= Key.F12 && key != Key.F8;
+
+    static string FormatHotkey(int modifiers, Key key)
+    {
+        var parts = new List<string>();
+        if ((modifiers & ModControl) != 0) parts.Add("Ctrl");
+        if ((modifiers & ModAlt) != 0) parts.Add("Alt");
+        if ((modifiers & ModShift) != 0) parts.Add("Shift");
+        parts.Add(KeyToText(key));
+        return string.Join("+", parts);
+    }
+
+    static string KeyToText(Key key)
+    {
+        if (key >= Key.D0 && key <= Key.D9)
+            return ((int)key - (int)Key.D0).ToString();
+        return key.ToString();
+    }
+
+    static bool TryParseHotkey(string hotkey, out int modifiers, out Key key)
+    {
+        modifiers = 0;
+        key = Key.None;
+
+        foreach (string part in hotkey.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            switch (part.ToLowerInvariant())
+            {
+                case "ctrl":
+                case "control":
+                    modifiers |= ModControl;
+                    break;
+                case "alt":
+                    modifiers |= ModAlt;
+                    break;
+                case "shift":
+                    modifiers |= ModShift;
+                    break;
+                default:
+                    if (key != Key.None || !TryParseKeyText(part, out key))
+                        return false;
+                    break;
+            }
+        }
+
+        return key != Key.None;
+    }
+
+    static bool TryParseKeyText(string text, out Key key)
+    {
+        key = Key.None;
+        if (text.Length == 1)
+        {
+            char c = char.ToUpperInvariant(text[0]);
+            if (c >= 'A' && c <= 'Z')
+            {
+                key = (Key)((int)Key.A + c - 'A');
+                return true;
+            }
+
+            if (c >= '0' && c <= '9')
+            {
+                key = (Key)((int)Key.D0 + c - '0');
+                return true;
+            }
+        }
+
+        if (!Enum.TryParse(text, true, out Key parsed) || IsModifierKey(parsed))
+            return false;
+
+        key = parsed;
+        return true;
+    }
+
+    IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == WmHotkey)
+        {
+            int hotkeyId = wParam.ToInt32();
+            if (hotkeyId == HotkeyApply)
+                _ = ApplyAllAsync();
+            else if (_flagHotkeys.TryGetValue(hotkeyId, out int index))
+                ToggleFlagAt(index);
+            handled = true;
+        }
+
+        return IntPtr.Zero;
     }
 
     void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
